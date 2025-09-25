@@ -147,19 +147,23 @@ public class MainActivity extends AppCompatActivity {
                     .recognizeWithCountryRegionNConfig("us", "", imageFile.getAbsolutePath(), openAlprConfFile, 10);
 
             runOnUiThread(() -> {
-                try {
-                    JSONObject json = new JSONObject(result);
-                    JSONArray resultsArray = json.getJSONArray("results");
-                    if (resultsArray.length() > 0) {
-                        String plate = resultsArray.getJSONObject(0).getString("plate");
-                        logLicensePlate(plate);
-                        Toast.makeText(MainActivity.this, "Plate detected: " + plate, Toast.LENGTH_LONG).show();
-                    } else {
-                        Toast.makeText(MainActivity.this, "No license plate found.", Toast.LENGTH_SHORT).show();
+                if (result != null && result.contains("results")) {
+                    try {
+                        JSONObject json = new JSONObject(result);
+                        JSONArray resultsArray = json.getJSONArray("results");
+                        if (resultsArray.length() > 0) {
+                            String plate = resultsArray.getJSONObject(0).getString("plate");
+                            logLicensePlate(plate);
+                            Toast.makeText(MainActivity.this, "Plate detected: " + plate, Toast.LENGTH_LONG).show();
+                        } else {
+                            Toast.makeText(MainActivity.this, "No license plate found.", Toast.LENGTH_SHORT).show();
+                        }
+                    } catch (JSONException e) {
+                        e.printStackTrace();
+                        Toast.makeText(MainActivity.this, "Failed to parse ALPR result.", Toast.LENGTH_SHORT).show();
                     }
-                } catch (JSONException e) {
-                    e.printStackTrace();
-                    Toast.makeText(MainActivity.this, "Failed to parse ALPR result.", Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(MainActivity.this, "No license plate found.", Toast.LENGTH_SHORT).show();
                 }
             });
         }).start();
