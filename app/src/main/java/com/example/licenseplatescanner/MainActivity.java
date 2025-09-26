@@ -147,23 +147,19 @@ public class MainActivity extends AppCompatActivity {
                     .recognizeWithCountryRegionNConfig("us", "", imageFile.getAbsolutePath(), openAlprConfFile, 10);
 
             runOnUiThread(() -> {
-                if (result != null && result.contains("results")) {
-                    try {
-                        JSONObject json = new JSONObject(result);
-                        JSONArray resultsArray = json.getJSONArray("results");
-                        if (resultsArray.length() > 0) {
-                            String plate = resultsArray.getJSONObject(0).getString("plate");
-                            logLicensePlate(plate);
-                            Toast.makeText(MainActivity.this, "Plate detected: " + plate, Toast.LENGTH_LONG).show();
-                        } else {
-                            Toast.makeText(MainActivity.this, "No license plate found.", Toast.LENGTH_SHORT).show();
-                        }
-                    } catch (JSONException e) {
-                        e.printStackTrace();
-                        Toast.makeText(MainActivity.this, "Failed to parse ALPR result.", Toast.LENGTH_SHORT).show();
+                try {
+                    JSONObject json = new JSONObject(result);
+                    JSONArray resultsArray = json.getJSONArray("results");
+                    if (resultsArray.length() > 0) {
+                        String plate = resultsArray.getJSONObject(0).getString("plate");
+                        logLicensePlate(plate);
+                        Toast.makeText(MainActivity.this, "LP number " + plate, Toast.LENGTH_LONG).show();
+                    } else {
+                        Toast.makeText(MainActivity.this, "Not detected", Toast.LENGTH_SHORT).show();
                     }
-                } else {
-                    Toast.makeText(MainActivity.this, "No license plate found.", Toast.LENGTH_SHORT).show();
+                } catch (JSONException e) {
+                    e.printStackTrace();
+                    Toast.makeText(MainActivity.this, "Not detected", Toast.LENGTH_SHORT).show();
                 }
             });
         }).start();
@@ -173,7 +169,7 @@ public class MainActivity extends AppCompatActivity {
         String timeStamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(new Date());
         String logEntry = timeStamp + " - " + licensePlate + "\n";
 
-        File logFile = new File(Environment.getExternalStorageDirectory(), "license_plates.txt");
+        File logFile = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "license_plates.txt");
         try {
             FileOutputStream fos = new FileOutputStream(logFile, true);
             fos.write(logEntry.getBytes());
@@ -192,7 +188,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private File getOutputMediaFile() {
-        File mediaStorageDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "LicensePlateScanner");
+        File mediaStorageDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "LicensePlateScanner");
         if (!mediaStorageDir.exists()) {
             if (!mediaStorageDir.mkdirs()) {
                 return null;
