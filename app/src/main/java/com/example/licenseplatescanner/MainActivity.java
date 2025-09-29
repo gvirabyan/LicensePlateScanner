@@ -2,6 +2,7 @@ package com.example.licenseplatescanner;
 
 import android.Manifest;
 import android.content.pm.PackageManager;
+import android.content.res.AssetManager;
 import android.os.Bundle;
 import android.os.Environment;
 import android.widget.Button;
@@ -30,6 +31,8 @@ import org.openalpr.OpenALPR;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -53,6 +56,8 @@ public class MainActivity extends AppCompatActivity {
         scanButton = findViewById(R.id.scan_button);
         flashlightButton = findViewById(R.id.flashlight_button);
 
+        copyAsset("runtime_data");
+
         if (checkPermissions()) {
             startCamera();
         } else {
@@ -62,6 +67,49 @@ public class MainActivity extends AppCompatActivity {
         scanButton.setOnClickListener(v -> takePicture());
         flashlightButton.setOnClickListener(v -> toggleFlashlight());
     }
+
+    private void copyAsset(String path) {
+        AssetManager assetManager = getAssets();
+        String[] assets;
+        try {
+            assets = assetManager.list(path);
+            if (assets.length == 0) {
+                copyFile(path);
+            } else {
+                String fullPath = getApplicationInfo().dataDir + "/" + path;
+                File dir = new File(fullPath);
+                if (!dir.exists())
+                    dir.mkdir();
+                for (String asset : assets) {
+                    copyAsset(path + "/" + asset);
+                }
+            }
+        } catch (IOException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    private void copyFile(String filename) {
+        AssetManager assetManager = getAssets();
+
+        String targetPath = getApplicationInfo().dataDir + "/" + filename;
+        File outFile = new File(targetPath);
+        if (outFile.exists()) {
+            return;
+        }
+
+        try (InputStream in = assetManager.open(filename);
+             OutputStream out = new FileOutputStream(targetPath)) {
+            byte[] buffer = new byte[1024];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
 
     private boolean checkPermissions() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
