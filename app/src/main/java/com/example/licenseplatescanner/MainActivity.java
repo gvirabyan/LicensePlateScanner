@@ -2,9 +2,9 @@ package com.example.licenseplatescanner;
 
 import android.Manifest;
 import android.content.pm.PackageManager;
-import android.content.res.AssetManager;
 import android.os.Bundle;
 import android.os.Environment;
+import android.view.View;
 import android.widget.Button;
 import android.widget.Toast;
 import android.widget.ToggleButton;
@@ -26,17 +26,23 @@ import com.google.common.util.concurrent.ListenableFuture;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
-import org.openalpr.OpenALPR;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutionException;
+
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.MediaType;
+import okhttp3.MultipartBody;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -47,6 +53,9 @@ public class MainActivity extends AppCompatActivity {
     private ImageCapture imageCapture;
     private Camera camera;
 
+    // ⭐ Твой облачный API токен Plate Recognizer
+    private final String API_KEY = "f33976fb5fd347e31a11fa808efbed2b85cc31f1";
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -55,8 +64,7 @@ public class MainActivity extends AppCompatActivity {
         previewView = findViewById(R.id.preview_view);
         scanButton = findViewById(R.id.scan_button);
         flashlightButton = findViewById(R.id.flashlight_button);
-
-        copyAsset("runtime_data");
+        flashlightButton.setVisibility(View.GONE);
 
         if (checkPermissions()) {
             startCamera();
@@ -67,49 +75,6 @@ public class MainActivity extends AppCompatActivity {
         scanButton.setOnClickListener(v -> takePicture());
         flashlightButton.setOnClickListener(v -> toggleFlashlight());
     }
-
-    private void copyAsset(String path) {
-        AssetManager assetManager = getAssets();
-        String[] assets;
-        try {
-            assets = assetManager.list(path);
-            if (assets.length == 0) {
-                copyFile(path);
-            } else {
-                String fullPath = getApplicationInfo().dataDir + "/" + path;
-                File dir = new File(fullPath);
-                if (!dir.exists())
-                    dir.mkdir();
-                for (String asset : assets) {
-                    copyAsset(path + "/" + asset);
-                }
-            }
-        } catch (IOException ex) {
-            ex.printStackTrace();
-        }
-    }
-
-    private void copyFile(String filename) {
-        AssetManager assetManager = getAssets();
-
-        String targetPath = getApplicationInfo().dataDir + "/" + filename;
-        File outFile = new File(targetPath);
-        if (outFile.exists()) {
-            return;
-        }
-
-        try (InputStream in = assetManager.open(filename);
-             OutputStream out = new FileOutputStream(targetPath)) {
-            byte[] buffer = new byte[1024];
-            int read;
-            while ((read = in.read(buffer)) != -1) {
-                out.write(buffer, 0, read);
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
 
     private boolean checkPermissions() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
@@ -126,11 +91,8 @@ public class MainActivity extends AppCompatActivity {
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_PERMISSIONS) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startCamera();
-            } else {
-                Toast.makeText(this, "Permissions not granted.", Toast.LENGTH_SHORT).show();
-            }
+            if (checkPermissions()) startCamera();
+            else Toast.makeText(this, "Permissions not granted.", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -157,12 +119,18 @@ public class MainActivity extends AppCompatActivity {
         cameraProvider.unbindAll();
         camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture);
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
+
+        if (camera.getCameraInfo().hasFlashUnit()) {
+            flashlightButton.setVisibility(View.VISIBLE);
+            flashlightButton.setChecked(false);
+            camera.getCameraControl().enableTorch(false);
+        } else {
+            flashlightButton.setVisibility(View.GONE);
+        }
     }
 
     private void takePicture() {
-        if (imageCapture == null) {
-            return;
-        }
+        if (imageCapture == null) return;
 
         File photoFile = getOutputMediaFile();
         if (photoFile == null) {
@@ -187,30 +155,53 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void recognizeLicensePlate(File imageFile) {
-        final String ANDROID_DATA_DIR = this.getApplicationInfo().dataDir;
-        final String openAlprConfFile = ANDROID_DATA_DIR + File.separatorChar + "runtime_data" + File.separatorChar + "openalpr.conf";
+        OkHttpClient client = new OkHttpClient();
 
-        new Thread(() -> {
-            String result = OpenALPR.Factory.create(MainActivity.this, ANDROID_DATA_DIR)
-                    .recognizeWithCountryRegionNConfig("us", "", imageFile.getAbsolutePath(), openAlprConfFile, 10);
+        RequestBody requestBody = new MultipartBody.Builder().setType(MultipartBody.FORM)
+                .addFormDataPart("upload", imageFile.getName(),
+                        RequestBody.create(imageFile, MediaType.get("image/jpeg")))
+                .build();
 
-            runOnUiThread(() -> {
-                try {
-                    JSONObject json = new JSONObject(result);
-                    JSONArray resultsArray = json.getJSONArray("results");
-                    if (resultsArray.length() > 0) {
-                        String plate = resultsArray.getJSONObject(0).getString("plate");
-                        logLicensePlate(plate);
-                        Toast.makeText(MainActivity.this, "LP number " + plate, Toast.LENGTH_LONG).show();
-                    } else {
-                        Toast.makeText(MainActivity.this, "Not detected", Toast.LENGTH_SHORT).show();
+        Request request = new Request.Builder()
+                .url("https://api.platerecognizer.com/v1/plate-reader/")
+                .addHeader("Authorization", "Token " + API_KEY)
+                .post(requestBody)
+                .build();
+
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NonNull Call call, @NonNull IOException e) {
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Error recognizing license plate.", Toast.LENGTH_SHORT).show());
+            }
+
+            @Override
+            public void onResponse(@NonNull Call call, @NonNull Response response) throws IOException {
+                String plate = "Not detected";
+                String body = response.body() != null ? response.body().string() : "";
+
+                if (!body.isEmpty()) {
+                    try {
+                        JSONObject json = new JSONObject(body);
+                        JSONArray results = json.getJSONArray("results");
+                        if (results.length() > 0) {
+                            plate = results.getJSONObject(0).getString("plate");
+                        }
+                    } catch (JSONException e) {
+                        e.printStackTrace();
                     }
-                } catch (JSONException e) {
-                    e.printStackTrace();
-                    Toast.makeText(MainActivity.this, "Not detected", Toast.LENGTH_SHORT).show();
                 }
-            });
-        }).start();
+
+                final String finalPlate = plate;
+                runOnUiThread(() -> {
+                    logLicensePlate(finalPlate);
+                    if ("Not detected".equals(finalPlate)) {
+                        Toast.makeText(MainActivity.this, finalPlate, Toast.LENGTH_SHORT).show();
+                    } else {
+                        Toast.makeText(MainActivity.this, "LP number " + finalPlate, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        });
     }
 
     private void logLicensePlate(String licensePlate) {
@@ -222,7 +213,6 @@ public class MainActivity extends AppCompatActivity {
             FileOutputStream fos = new FileOutputStream(logFile, true);
             fos.write(logEntry.getBytes());
             fos.close();
-            Toast.makeText(this, "License plate logged.", Toast.LENGTH_SHORT).show();
         } catch (IOException e) {
             e.printStackTrace();
             Toast.makeText(this, "Error logging license plate.", Toast.LENGTH_SHORT).show();
@@ -237,11 +227,8 @@ public class MainActivity extends AppCompatActivity {
 
     private File getOutputMediaFile() {
         File mediaStorageDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "LicensePlateScanner");
-        if (!mediaStorageDir.exists()) {
-            if (!mediaStorageDir.mkdirs()) {
-                return null;
-            }
-        }
+        if (!mediaStorageDir.exists() && !mediaStorageDir.mkdirs()) return null;
+
         String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
         return new File(mediaStorageDir.getPath() + File.separator + "IMG_" + timeStamp + ".jpg");
     }
