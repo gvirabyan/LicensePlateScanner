@@ -60,28 +60,25 @@ public class MainActivity extends AppCompatActivity {
     private static final String TAG = "LPR_SCANNER";
 
     private PreviewView previewView;
-    // Кнопка сканирования больше не нужна, так как анализ идет в потоке
     private ToggleButton flashlightButton;
+    private android.widget.Button manualScanButton;
+    private android.widget.TextView plateLogView;
+
 
     private Camera camera;
     private ExecutorService cameraExecutor;
     private PlateRecognizerService apiService;
-    private long lastApiCall = 0;
-    // Ограничение запросов до 1 раза в 1.5 секунды, чтобы не превысить лимит API
-    private static final long API_CALL_INTERVAL_MS = 1500;
-
-    // Флаг для предотвращения спама тостами о найденном номере
-    private String lastRecognizedPlate = "";
+    private volatile boolean scanRequested = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        // Убедитесь, что ваш layout (activity_main.xml) содержит PreviewView с ID preview_view
-        // и ToggleButton с ID flashlight_button
         previewView = findViewById(R.id.preview_view);
         flashlightButton = findViewById(R.id.flashlight_button);
+        manualScanButton = findViewById(R.id.manual_scan_button);
+        plateLogView = findViewById(R.id.plate_log_view);
 
         cameraExecutor = Executors.newSingleThreadExecutor();
         setupRetrofit();
@@ -93,6 +90,10 @@ public class MainActivity extends AppCompatActivity {
         }
 
         flashlightButton.setOnClickListener(v -> toggleFlashlight());
+        manualScanButton.setOnClickListener(v -> {
+            plateLogView.setText("Scanning...");
+            scanRequested = true;
+        });
     }
 
     private void setupRetrofit() {
@@ -169,20 +170,16 @@ public class MainActivity extends AppCompatActivity {
     private class PlateAnalyzer implements ImageAnalysis.Analyzer {
         @Override
         public void analyze(@NonNull ImageProxy imageProxy) {
-            // Ограничение частоты вызовов API
-            if (System.currentTimeMillis() - lastApiCall < API_CALL_INTERVAL_MS) {
-                imageProxy.close();
-                return;
+            if (scanRequested) {
+                scanRequested = false; // Reset the flag
+                byte[] imageBytes = imageProxyToJpegByteArray(imageProxy);
+                if (imageBytes != null) {
+                    uploadImageForRecognition(imageBytes);
+                } else {
+                    runOnUiThread(() -> plateLogView.setText("Failed to capture image."));
+                }
             }
-            lastApiCall = System.currentTimeMillis();
-
-            // Конвертация ImageProxy в JPEG ByteArray
-            byte[] imageBytes = imageProxyToJpegByteArray(imageProxy);
             imageProxy.close();
-
-            if (imageBytes != null) {
-                uploadImageForRecognition(imageBytes);
-            }
         }
     }
 
@@ -231,32 +228,35 @@ public class MainActivity extends AppCompatActivity {
         // Установка регионов: Массачусетс и США
         RequestBody regions = RequestBody.create(MediaType.parse("text/plain"), "us-massachusetts,us");
 
-        apiService.uploadImage(PlateRecognizerService.API_KEY, imagePart, regions, "true")
+        String authToken = "Token " + PlateRecognizerService.API_KEY;
+        apiService.uploadImage(authToken, imagePart, regions, "true")
                 .enqueue(new Callback<PlateRecognitionResponse>() {
                     @Override
                     public void onResponse(@NonNull Call<PlateRecognitionResponse> call,
                                            @NonNull Response<PlateRecognitionResponse> response) {
-                        if (response.isSuccessful() && response.body() != null) {
-                            PlateRecognitionResponse body = response.body();
-                            if (body.results != null && body.results.length > 0) {
-                                String plate = body.results[0].plate;
-
-                                // Сохраняем в файл только если это новый номер
-                                if (!plate.equals(lastRecognizedPlate)) {
-                                    lastRecognizedPlate = plate;
-                                    logLicensePlate(plate);
-                                    Toast.makeText(MainActivity.this, "Номер найден: " + plate, Toast.LENGTH_LONG).show();
-                                }
-                            }
+                        if (response.isSuccessful() && response.body() != null && response.body().results.length > 0) {
+                            String plate = response.body().results[0].plate;
+                            runOnUiThread(() -> {
+                                plateLogView.setText("Found: " + plate);
+                                logLicensePlate(plate);
+                                Toast.makeText(MainActivity.this, "Plate recognized: " + plate, Toast.LENGTH_LONG).show();
+                            });
                         } else {
-                            // Логируем ошибку, но не показываем Toast, чтобы не мешать пользователю
-                            Log.e(TAG, "Ошибка API: " + response.code() + " " + response.message());
+                            runOnUiThread(() -> {
+                                plateLogView.setText("No plate found.");
+                                Toast.makeText(MainActivity.this, "No plate found in the image.", Toast.LENGTH_SHORT).show();
+                            });
+                            Log.e(TAG, "API Error: " + response.code() + " " + response.message());
                         }
                     }
 
                     @Override
                     public void onFailure(@NonNull Call<PlateRecognitionResponse> call, @NonNull Throwable t) {
-                        Log.e(TAG, "Сетевая ошибка", t);
+                        runOnUiThread(() -> {
+                            plateLogView.setText("Network Error.");
+                            Toast.makeText(MainActivity.this, "Network request failed.", Toast.LENGTH_SHORT).show();
+                        });
+                        Log.e(TAG, "Network Error", t);
                     }
                 });
     }

@@ -10,14 +10,28 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+
     <Button
-        android:id="@+id/scan_button"
+        android:id="@+id/manual_scan_button"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_alignParentBottom="true"
         android:layout_centerHorizontal="true"
         android:layout_marginBottom="16dp"
-        android:text="Scan" />
+        android:text="Manual Scan" />
+
+    <TextView
+        android:id="@+id/plate_log_view"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_above="@id/manual_scan_button"
+        android:layout_marginBottom="8dp"
+        android:background="#80000000"
+        android:padding="8dp"
+        android:textColor="@android:color/white"
+        android:textSize="16sp"
+        android:gravity="center"
+        android:text="Last recognized plate will be shown here" />
 
     <ToggleButton
         android:id="@+id/flashlight_button"
