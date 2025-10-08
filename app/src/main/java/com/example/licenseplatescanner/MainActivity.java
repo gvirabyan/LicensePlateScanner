@@ -2,18 +2,9 @@ package com.example.licenseplatescanner;
 
 import android.Manifest;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.ImageFormat;
-import android.graphics.Matrix;
-import android.graphics.Rect;
-import android.graphics.YuvImage;
-import android.media.Image;
 import android.os.Bundle;
-import android.os.Environment;
 import android.os.Handler;
 import android.util.Log;
-import android.util.Size;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -24,83 +15,54 @@ import android.widget.Toast;
 import android.widget.ToggleButton;
 
 import androidx.annotation.NonNull;
-import androidx.annotation.OptIn;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.camera.core.Camera;
-import androidx.camera.core.CameraSelector;
-import androidx.camera.core.ExperimentalGetImage;
-import androidx.camera.core.ImageAnalysis;
-import androidx.camera.core.ImageProxy;
-import androidx.camera.core.Preview;
-import androidx.camera.lifecycle.ProcessCameraProvider;
-import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-import com.google.common.util.concurrent.ListenableFuture;
-
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
-import java.util.Objects;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import okhttp3.MediaType;
-import okhttp3.MultipartBody;
-import okhttp3.OkHttpClient;
-import okhttp3.RequestBody;
-import okhttp3.logging.HttpLoggingInterceptor;
 import retrofit2.Call;
 import retrofit2.Callback;
 import retrofit2.Response;
-import retrofit2.Retrofit;
-import retrofit2.converter.gson.GsonConverterFactory;
 
-import android.os.VibrationEffect;
-import android.os.Vibrator;
-
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements PlateImageAnalyzer.ScanListener {
 
     private static final int REQUEST_PERMISSIONS = 1;
     private static final String TAG = "LPR_SCANNER";
 
-    private PreviewView previewView;
+    // UI Components
+    private androidx.camera.view.PreviewView previewView;
     private ToggleButton flashlightButton;
     private ToggleButton autoScanSwitch;
     private TextView plateLogView;
     private TextView intervalTextView;
     private ImageButton intervalButton;
     private Button resetFileButton;
+    private TextView remainingScansView; // Добавлено
 
-    private String lastPlate = "";
-    private Camera camera;
+    // Managers and Clients
+    private CameraManager cameraManager;
+    private ScanLimitManager scanLimitManager; // Добавлено
+    private PlateRecognizerClient recognizerClient;
+    private PlateImageAnalyzer plateAnalyzer;
+    private LogManager logManager;
     private ExecutorService cameraExecutor;
-    private PlateRecognizerService apiService;
-    private volatile boolean scanRequested = false;
 
-    // --- Авто-сканирование ---
+    // Auto-Scan Logic
     private final Handler autoScanHandler = new Handler();
-    private int AUTO_SCAN_INTERVAL = 3000; // по умолчанию 3 сек
+    private int AUTO_SCAN_INTERVAL = 3000; // Default: 3 seconds
     private boolean isAutoScanEnabled = false;
-
-    private TextView remainingScansView;
-    private int remainingScans = -1;
-
     private final int[] intervals = {2, 3, 5, 10, 15, 30, 60};
 
     private final Runnable autoScanTask = new Runnable() {
         @Override
         public void run() {
-            if (isAutoScanEnabled && !scanRequested) {
+            if (isAutoScanEnabled) {
+                // ВАЖНО: Никакой блокировки здесь нет, сканирование запускается всегда
                 runOnUiThread(() -> plateLogView.setText("Auto Scanning..."));
-                scanRequested = true;
+                plateAnalyzer.requestScan(); // Trigger frame capture
             }
             if (isAutoScanEnabled) {
                 autoScanHandler.postDelayed(this, AUTO_SCAN_INTERVAL);
@@ -114,28 +76,55 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        initViews();
+
+        // Initialize components
+        cameraExecutor = Executors.newSingleThreadExecutor();
+        recognizerClient = new PlateRecognizerClient();
+        scanLimitManager = new ScanLimitManager(this); // Инициализация
+        logManager = new LogManager(this);
+        cameraManager = new CameraManager(this, cameraExecutor);
+        plateAnalyzer = new PlateImageAnalyzer(this);
+
+        if (checkPermissions()) {
+            startCameraSetup();
+        } else {
+            requestPermissions();
+        }
+
+        setupListeners();
+        updateRemainingScansUI(); // Первичное обновление счетчика
+    }
+
+    private void initViews() {
         previewView = findViewById(R.id.preview_view);
         flashlightButton = findViewById(R.id.flashlight_button);
         autoScanSwitch = findViewById(R.id.auto_scan_switch);
         plateLogView = findViewById(R.id.plate_log_view);
         intervalTextView = findViewById(R.id.interval_text);
         intervalButton = findViewById(R.id.interval_button);
-        remainingScansView = findViewById(R.id.remaining_scans_view);
+        resetFileButton = findViewById(R.id.reset_file_button);
+        remainingScansView = findViewById(R.id.remaining_scans_view); // Инициализация
+    }
 
+    // --- Метод для обновления UI счетчика ---
+    private void updateRemainingScansUI() {
+        int remaining = scanLimitManager.getRemainingScans();
+        remainingScansView.setText("Remaining: " + remaining);
 
-        cameraExecutor = Executors.newSingleThreadExecutor();
-        setupRetrofit();
-
-        if (checkPermissions()) {
-            startCamera();
+        // Цветовое выделение, если сканирований мало
+        if (remaining <= 50) {
+            remainingScansView.setTextColor(ContextCompat.getColor(this, android.R.color.holo_red_dark));
         } else {
-            requestPermissions();
+            remainingScansView.setTextColor(ContextCompat.getColor(this, android.R.color.white));
         }
 
-        resetFileButton = findViewById(R.id.reset_file_button);
-        resetFileButton.setOnClickListener(v -> showResetConfirmationDialog());
+        // ВАЖНО: Никакого отключения элементов UI здесь нет
+    }
 
-        flashlightButton.setOnClickListener(v -> toggleFlashlight());
+    private void setupListeners() {
+        resetFileButton.setOnClickListener(v -> showResetConfirmationDialog());
+        flashlightButton.setOnClickListener(v -> cameraManager.toggleFlashlight(flashlightButton.isChecked()));
 
         autoScanSwitch.setChecked(false);
         autoScanSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
@@ -150,51 +139,85 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // Установка текста текущего интервала
         updateIntervalLabel();
-
-        // Обработка клика на иконку часов
         intervalButton.setOnClickListener(this::showIntervalMenu);
     }
 
-    private void vibrateShort() {
-        Vibrator vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
-        if (vibrator != null && vibrator.hasVibrator()) {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                vibrator.vibrate(VibrationEffect.createOneShot(150, VibrationEffect.DEFAULT_AMPLITUDE));
+    // --- Camera & Permissions (Без изменений) ---
+
+    private boolean checkPermissions() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestPermissions() {
+        ActivityCompat.requestPermissions(this,
+                new String[]{Manifest.permission.CAMERA, Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                REQUEST_PERMISSIONS);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_PERMISSIONS) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startCameraSetup();
             } else {
-                vibrator.vibrate(150);
+                Toast.makeText(this, "Camera and storage permissions were not granted.", Toast.LENGTH_SHORT).show();
             }
         }
     }
+
+    private void startCameraSetup() {
+        cameraManager.startCamera(previewView, plateAnalyzer);
+    }
+
+    // --- ScanListener (Callback from PlateImageAnalyzer) ---
+
+    @Override
+    public void onImageReady(byte[] jpegBytes) {
+
+        // УМЕНЬШЕНИЕ СЧЕТЧИКА: уменьшаем счетчик и обновляем UI сразу после захвата кадра
+        scanLimitManager.decrementScanCount();
+        runOnUiThread(this::updateRemainingScansUI);
+
+        recognizerClient.recognizePlate(jpegBytes, new Callback<PlateRecognitionResponse>() {
+            @Override
+            public void onResponse(@NonNull Call<PlateRecognitionResponse> call,
+                                   @NonNull Response<PlateRecognitionResponse> response) {
+                if (response.isSuccessful() && response.body() != null && response.body().results != null && response.body().results.length > 0) {
+                    String plate = response.body().results[0].plate;
+                    runOnUiThread(() -> {
+                        plateLogView.setText("Found: " + plate);
+                        logManager.logLicensePlate(plate);
+                    });
+                } else {
+                    runOnUiThread(() -> plateLogView.setText("No plate found."));
+                }
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<PlateRecognitionResponse> call, @NonNull Throwable t) {
+                runOnUiThread(() -> {
+                    plateLogView.setText("Network Error.");
+                    Log.e(TAG, "Network request failed: " + t.getMessage());
+                });
+            }
+        });
+    }
+
+    // --- UI/Log Management (Без изменений) ---
 
     private void showResetConfirmationDialog() {
-        new androidx.appcompat.app.AlertDialog.Builder(this)
+        new AlertDialog.Builder(this)
                 .setTitle("Clear Log?")
                 .setMessage("Are you sure you want to delete all saved license plates?")
-                .setPositiveButton("Yes", (dialog, which) -> resetLogFile())
+                .setPositiveButton("Yes", (dialog, which) -> {
+                    logManager.resetLogFile();
+                    plateLogView.setText("Log cleared.");
+                })
                 .setNegativeButton("Cancel", (dialog, which) -> dialog.dismiss())
                 .show();
-    }
-
-
-    private void resetLogFile() {
-        File documentsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS);
-        File logFile = new File(documentsDir, "license_plates.txt");
-
-        if (logFile.exists()) {
-            try (FileWriter writer = new FileWriter(logFile, false)) {
-                writer.write(""); // очистка содержимого
-                Toast.makeText(this, "Файл очищен успешно", Toast.LENGTH_SHORT).show();
-                plateLogView.setText("Log cleared.");
-                lastPlate = "";
-            } catch (IOException e) {
-                Log.e(TAG, "Ошибка при очистке файла", e);
-                Toast.makeText(this, "Ошибка при очистке файла", Toast.LENGTH_SHORT).show();
-            }
-        } else {
-            Toast.makeText(this, "Файл не найден", Toast.LENGTH_SHORT).show();
-        }
     }
 
     private void showIntervalMenu(View view) {
@@ -208,6 +231,11 @@ public class MainActivity extends AppCompatActivity {
             AUTO_SCAN_INTERVAL = selected * 1000;
             updateIntervalLabel();
             Toast.makeText(this, "Interval set to " + selected + " sec", Toast.LENGTH_SHORT).show();
+
+            if (isAutoScanEnabled) {
+                startAutoScan();
+            }
+
             return true;
         });
 
@@ -219,200 +247,7 @@ public class MainActivity extends AppCompatActivity {
         intervalTextView.setText(sec + "s");
     }
 
-    private void setupRetrofit() {
-        HttpLoggingInterceptor logging = new HttpLoggingInterceptor();
-        logging.setLevel(HttpLoggingInterceptor.Level.BODY);
-
-        OkHttpClient client = new OkHttpClient.Builder()
-                .addInterceptor(logging)
-                .build();
-
-        Retrofit retrofit = new Retrofit.Builder()
-                .baseUrl("https://api.platerecognizer.com/v1/")
-                .client(client)
-                .addConverterFactory(GsonConverterFactory.create())
-                .build();
-
-        apiService = retrofit.create(PlateRecognizerService.class);
-    }
-
-    private boolean checkPermissions() {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private void requestPermissions() {
-        ActivityCompat.requestPermissions(this,
-                new String[]{Manifest.permission.CAMERA},
-                REQUEST_PERMISSIONS);
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQUEST_PERMISSIONS) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startCamera();
-            } else {
-                Toast.makeText(this, "Разрешение на камеру не предоставлено.", Toast.LENGTH_SHORT).show();
-            }
-        }
-    }
-
-    private void startCamera() {
-        ListenableFuture<ProcessCameraProvider> cameraProviderFuture = ProcessCameraProvider.getInstance(this);
-        cameraProviderFuture.addListener(() -> {
-            try {
-                ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
-                bindCameraUseCases(cameraProvider);
-            } catch (ExecutionException | InterruptedException e) {
-                Log.e(TAG, "Ошибка запуска камеры", e);
-            }
-        }, ContextCompat.getMainExecutor(this));
-    }
-
-    private void bindCameraUseCases(ProcessCameraProvider cameraProvider) {
-        Preview preview = new Preview.Builder().build();
-        CameraSelector cameraSelector = new CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
-                .build();
-
-        ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
-                .setTargetResolution(new Size(1280, 720))
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build();
-
-        imageAnalysis.setTargetRotation(previewView.getDisplay().getRotation());
-        imageAnalysis.setAnalyzer(cameraExecutor, new PlateAnalyzer());
-
-        cameraProvider.unbindAll();
-        camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
-        preview.setSurfaceProvider(previewView.getSurfaceProvider());
-    }
-
-    private class PlateAnalyzer implements ImageAnalysis.Analyzer {
-        @Override
-        public void analyze(@NonNull ImageProxy imageProxy) {
-            if (scanRequested) {
-                scanRequested = false;
-                byte[] imageBytes = imageProxyToJpegByteArray(imageProxy);
-                if (imageBytes != null) {
-                    uploadImageForRecognition(imageBytes);
-                } else {
-                    runOnUiThread(() -> plateLogView.setText("Failed to capture image."));
-                }
-            }
-            imageProxy.close();
-        }
-    }
-
-    @OptIn(markerClass = ExperimentalGetImage.class)
-    private byte[] imageProxyToJpegByteArray(ImageProxy imageProxy) {
-        Image image = imageProxy.getImage();
-        if (image == null) return null;
-
-        if (imageProxy.getFormat() != ImageFormat.YUV_420_888) {
-            Log.e(TAG, "Неподдерживаемый формат изображения: " + imageProxy.getFormat());
-            return null;
-        }
-
-        Image.Plane[] planes = image.getPlanes();
-        ByteBuffer yBuffer = planes[0].getBuffer();
-        ByteBuffer uBuffer = planes[1].getBuffer();
-        ByteBuffer vBuffer = planes[2].getBuffer();
-
-        int ySize = yBuffer.remaining();
-        int uSize = uBuffer.remaining();
-        int vSize = vBuffer.remaining();
-
-        byte[] nv21 = new byte[ySize + uSize + vSize];
-        yBuffer.get(nv21, 0, ySize);
-        vBuffer.get(nv21, ySize, vSize);
-        uBuffer.get(nv21, ySize + vSize, uSize);
-
-        YuvImage yuvImage = new YuvImage(nv21, ImageFormat.NV21, image.getWidth(), image.getHeight(), null);
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        yuvImage.compressToJpeg(new Rect(0, 0, yuvImage.getWidth(), yuvImage.getHeight()), 90, out);
-
-        byte[] jpegBytes = out.toByteArray();
-
-        int rotationDegrees = imageProxy.getImageInfo().getRotationDegrees();
-        if (rotationDegrees != 0) {
-            jpegBytes = rotateJpeg(jpegBytes, rotationDegrees);
-        }
-
-        return jpegBytes;
-    }
-
-    private byte[] rotateJpeg(byte[] jpeg, int degrees) {
-        Bitmap bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
-        Matrix matrix = new Matrix();
-        matrix.postRotate(degrees);
-        Bitmap rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        rotated.compress(Bitmap.CompressFormat.JPEG, 90, out);
-        return out.toByteArray();
-    }
-
-    private void uploadImageForRecognition(byte[] imageBytes) {
-        RequestBody imageBody = RequestBody.create(MediaType.parse("image/jpeg"), imageBytes);
-        MultipartBody.Part imagePart = MultipartBody.Part.createFormData("upload", "frame.jpg", imageBody);
-        RequestBody regions = RequestBody.create(MediaType.parse("text/plain"), "us");
-
-        String authToken = "Token " + PlateRecognizerService.API_KEY;
-        apiService.uploadImage(authToken, imagePart, regions, "true")
-                .enqueue(new Callback<PlateRecognitionResponse>() {
-                    @Override
-                    public void onResponse(@NonNull Call<PlateRecognitionResponse> call,
-                                           @NonNull Response<PlateRecognitionResponse> response) {
-                        if (response.isSuccessful() && response.body() != null && response.body().results.length > 0) {
-                            String plate = response.body().results[0].plate;
-                            runOnUiThread(() -> {
-                                plateLogView.setText("Found: " + plate);
-                                logLicensePlate(plate);
-                            });
-                        } else {
-                            runOnUiThread(() -> plateLogView.setText("No plate found."));
-                        }
-                    }
-
-                    @Override
-                    public void onFailure(@NonNull Call<PlateRecognitionResponse> call, @NonNull Throwable t) {
-                        runOnUiThread(() -> {
-                            plateLogView.setText("Network Error.");
-                            Toast.makeText(MainActivity.this, "Network request failed.", Toast.LENGTH_SHORT).show();
-                        });
-                    }
-                });
-    }
-
-
-
-    private void logLicensePlate(String licensePlate) {
-        if (!Objects.equals(lastPlate, licensePlate)) {
-            String timeStamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(new Date());
-            String logEntry = timeStamp + ", " + licensePlate + "\n";
-
-            File documentsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS);
-            if (documentsDir != null && !documentsDir.exists()) {
-                documentsDir.mkdirs();
-            }
-
-            File logFile = new File(documentsDir, "license_plates.txt");
-            try (FileWriter writer = new FileWriter(logFile, true)) {
-                writer.append(logEntry);
-                vibrateShort();
-            } catch (IOException e) {
-                Log.e(TAG, "Error saving license plate to file.", e);
-            }
-            lastPlate = licensePlate;
-        }
-    }
-
-    private void toggleFlashlight() {
-        if (camera != null && camera.getCameraInfo().hasFlashUnit()) {
-            camera.getCameraControl().enableTorch(flashlightButton.isChecked());
-        }
-    }
+    // --- Auto Scan Control (Без изменений) ---
 
     private void startAutoScan() {
         stopAutoScan();
@@ -422,16 +257,18 @@ public class MainActivity extends AppCompatActivity {
 
     private void stopAutoScan() {
         autoScanHandler.removeCallbacks(autoScanTask);
-        scanRequested = false;
         Log.i(TAG, "Auto scan stopped.");
     }
+
+    // --- Lifecycle (Без изменений) ---
 
     @Override
     protected void onResume() {
         super.onResume();
-        isAutoScanEnabled = false;
-        autoScanSwitch.setChecked(false);
-        stopAutoScan();
+        if (autoScanSwitch.isChecked()) {
+            isAutoScanEnabled = true;
+            startAutoScan();
+        }
     }
 
     @Override
