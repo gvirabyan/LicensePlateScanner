@@ -1,6 +1,7 @@
 package com.example.licenseplatescanner;
 
 import android.Manifest;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -132,10 +133,16 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
                 isAutoScanEnabled = true;
                 startAutoScan();
                 plateLogView.setText("Auto Scan ON");
+
+                Intent serviceIntent = new Intent(this, BackgroundScanService.class);
+                ContextCompat.startForegroundService(this, serviceIntent);
             } else {
                 isAutoScanEnabled = false;
                 stopAutoScan();
                 plateLogView.setText("Auto Scan OFF");
+
+                stopService(new Intent(this, BackgroundScanService.class));
+
             }
         });
 
@@ -274,12 +281,13 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
     @Override
     protected void onPause() {
         super.onPause();
-        stopAutoScan();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         cameraExecutor.shutdown();
+        stopService(new Intent(this, BackgroundScanService.class));
+
     }
 }
