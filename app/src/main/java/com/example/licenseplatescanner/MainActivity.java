@@ -1,11 +1,13 @@
 package com.example.licenseplatescanner;
 
 import android.Manifest;
+import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
-import android.os.Handler;
-import android.util.Log;
+import android.os.IBinder;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -21,17 +23,9 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
-import retrofit2.Call;
-import retrofit2.Callback;
-import retrofit2.Response;
-
-public class MainActivity extends AppCompatActivity implements PlateImageAnalyzer.ScanListener {
+public class MainActivity extends AppCompatActivity implements ServiceCallback {
 
     private static final int REQUEST_PERMISSIONS = 1;
-    private static final String TAG = "LPR_SCANNER";
 
     // UI Components
     private androidx.camera.view.PreviewView previewView;
@@ -41,37 +35,17 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
     private TextView intervalTextView;
     private ImageButton intervalButton;
     private Button resetFileButton;
-    private TextView remainingScansView; // Добавлено
+    private TextView remainingScansView;
 
-    // Managers and Clients
-    private CameraManager cameraManager;
-    private ScanLimitManager scanLimitManager; // Добавлено
-    private PlateRecognizerClient recognizerClient;
-    private PlateImageAnalyzer plateAnalyzer;
-    private LogManager logManager;
-    private ExecutorService cameraExecutor;
-
-    // Auto-Scan Logic
-    private final Handler autoScanHandler = new Handler();
-    private int AUTO_SCAN_INTERVAL = 3000; // Default: 3 seconds
-    private boolean isAutoScanEnabled = false;
+    // Service
+    private BackgroundScanService scanService;
+    private boolean isBound = false;
     private final int[] intervals = {2, 3, 5, 10, 15, 30, 60};
-    private Runnable autoScanTask;
-    //private final Handler autoScanHandler = new Handler();
-   /* private final Runnable autoScanTask = new Runnable() {
-        @Override
-        public void run() {
-            if (isAutoScanEnabled) {
-                // ВАЖНО: Никакой блокировки здесь нет, сканирование запускается всегда
-                runOnUiThread(() -> plateLogView.setText("Auto Scanning..."));
-                plateAnalyzer.requestScan(); // Trigger frame capture
-            }
-            if (isAutoScanEnabled) {
-                autoScanHandler.postDelayed(this, AUTO_SCAN_INTERVAL);
-            }
-        }
-    };
-*/
+    private int currentInterval = 3000;
+
+    private LogManager logManager;
+
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -79,38 +53,8 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         initViews();
-
-        // Initialize components
-        cameraExecutor = Executors.newSingleThreadExecutor();
-        recognizerClient = new PlateRecognizerClient();
-        scanLimitManager = new ScanLimitManager(this); // Инициализация
         logManager = new LogManager(this);
-        cameraManager = new CameraManager(this, cameraExecutor);
-        plateAnalyzer = new PlateImageAnalyzer(this);
-
-        if (checkPermissions()) {
-            startCameraSetup();
-        } else {
-            requestPermissions();
-        }
-
         setupListeners();
-        updateRemainingScansUI();
-
-        autoScanTask = new Runnable() {
-            @Override
-            public void run() {
-                if (isAutoScanEnabled) {
-                    runOnUiThread(() -> {
-                        plateLogView.setText("Auto Scanning...");
-                    });
-
-                    plateAnalyzer.requestScan();
-                    autoScanHandler.postDelayed(this, AUTO_SCAN_INTERVAL);
-                }
-            }
-        };
-
     }
 
     private void initViews() {
@@ -121,44 +65,26 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
         intervalTextView = findViewById(R.id.interval_text);
         intervalButton = findViewById(R.id.interval_button);
         resetFileButton = findViewById(R.id.reset_file_button);
-        remainingScansView = findViewById(R.id.remaining_scans_view); // Инициализация
-    }
-
-    // --- Метод для обновления UI счетчика ---
-    private void updateRemainingScansUI() {
-        int remaining = scanLimitManager.getRemainingScans();
-        remainingScansView.setText("Remaining: " + remaining);
-
-        // Цветовое выделение, если сканирований мало
-        if (remaining <= 50) {
-            remainingScansView.setTextColor(ContextCompat.getColor(this, android.R.color.holo_red_dark));
-        } else {
-            remainingScansView.setTextColor(ContextCompat.getColor(this, android.R.color.white));
-        }
-
-        // ВАЖНО: Никакого отключения элементов UI здесь нет
+        remainingScansView = findViewById(R.id.remaining_scans_view);
     }
 
     private void setupListeners() {
         resetFileButton.setOnClickListener(v -> showResetConfirmationDialog());
-        flashlightButton.setOnClickListener(v -> cameraManager.toggleFlashlight(flashlightButton.isChecked()));
 
-        autoScanSwitch.setChecked(false);
+        flashlightButton.setOnClickListener(v -> {
+            if (isBound) {
+                scanService.toggleFlashlight(flashlightButton.isChecked());
+            }
+        });
+
         autoScanSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (!isBound) return;
             if (isChecked) {
-                isAutoScanEnabled = true;
-                startAutoScan();
-                plateLogView.setText("Auto Scan ON");
-
-//                Intent serviceIntent = new Intent(this, BackgroundScanService.class);
-//                ContextCompat.startForegroundService(this, serviceIntent);
+                Intent serviceIntent = new Intent(this, BackgroundScanService.class);
+                ContextCompat.startForegroundService(this, serviceIntent);
+                scanService.startAutoScan();
             } else {
-                isAutoScanEnabled = false;
-                stopAutoScan();
-                plateLogView.setText("Auto Scan OFF");
-
-//                stopService(new Intent(this, BackgroundScanService.class));
-
+                scanService.stopAutoScan();
             }
         });
 
@@ -166,8 +92,70 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
         intervalButton.setOnClickListener(this::showIntervalMenu);
     }
 
-    // --- Camera & Permissions (Без изменений) ---
+    private final ServiceConnection serviceConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            BackgroundScanService.LocalBinder binder = (BackgroundScanService.LocalBinder) service;
+            scanService = binder.getService();
+            isBound = true;
+            scanService.setCallback(MainActivity.this);
+            scanService.attachPreview(previewView);
 
+            // Update UI with current service state
+            autoScanSwitch.setChecked(scanService.isAutoScanning());
+            onRemainingScansUpdated(scanService.getRemainingScans());
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            isBound = false;
+            scanService = null;
+        }
+    };
+
+    // --- ServiceCallback Implementation ---
+    @Override
+    public void onPlateRecognized(String plate) {
+        runOnUiThread(() -> {
+            plateLogView.setText("Found: " + plate);
+            VibratorHelper.vibrate(MainActivity.this, 20);
+        });
+    }
+
+    @Override
+    public void onScanStarted() {
+        runOnUiThread(() -> {
+            plateLogView.setText("Auto Scan ON");
+            autoScanSwitch.setChecked(true);
+        });
+    }
+
+    @Override
+    public void onScanStopped() {
+        runOnUiThread(() -> {
+            plateLogView.setText("Auto Scan OFF");
+            autoScanSwitch.setChecked(false);
+        });
+    }
+
+    @Override
+    public void onScanError(String message) {
+        runOnUiThread(() -> plateLogView.setText(message));
+    }
+
+    @Override
+    public void onRemainingScansUpdated(int remainingScans) {
+        runOnUiThread(() -> {
+            remainingScansView.setText("Remaining: " + remainingScans);
+            if (remainingScans <= 50) {
+                remainingScansView.setTextColor(ContextCompat.getColor(this, android.R.color.holo_red_dark));
+            } else {
+                remainingScansView.setTextColor(ContextCompat.getColor(this, android.R.color.white));
+            }
+        });
+    }
+
+    // --- Permissions ---
     private boolean checkPermissions() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
                 ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
@@ -184,55 +172,14 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_PERMISSIONS) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startCameraSetup();
+                // Permissions granted, we can now start the service connection in onStart
             } else {
-                Toast.makeText(this, "Camera and storage permissions were not granted.", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "Camera and storage permissions are required.", Toast.LENGTH_SHORT).show();
             }
         }
     }
 
-    private void startCameraSetup() {
-        cameraManager.startCamera(previewView, plateAnalyzer);
-    }
-
-    // --- ScanListener (Callback from PlateImageAnalyzer) ---
-
-    @Override
-    public void onImageReady(byte[] jpegBytes) {
-
-        // УМЕНЬШЕНИЕ СЧЕТЧИКА: уменьшаем счетчик и обновляем UI сразу после захвата кадра
-        scanLimitManager.decrementScanCount();
-        runOnUiThread(this::updateRemainingScansUI);
-
-        recognizerClient.recognizePlate(jpegBytes, new Callback<PlateRecognitionResponse>() {
-            @Override
-            public void onResponse(@NonNull Call<PlateRecognitionResponse> call,
-                                   @NonNull Response<PlateRecognitionResponse> response) {
-                if (response.isSuccessful() && response.body() != null && response.body().results != null && response.body().results.length > 0) {
-                    String plate = response.body().results[0].plate;
-                    runOnUiThread(() -> {
-                        plateLogView.setText("Found: " + plate);
-                        logManager.logLicensePlate(plate);
-                        VibratorHelper.vibrate(MainActivity.this, 100); // вибрация 150мс
-
-                    });
-                } else {
-                    runOnUiThread(() -> plateLogView.setText("No plate found."));
-                }
-            }
-
-            @Override
-            public void onFailure(@NonNull Call<PlateRecognitionResponse> call, @NonNull Throwable t) {
-                runOnUiThread(() -> {
-                    plateLogView.setText("Network Error.");
-                    Log.e(TAG, "Network request failed: " + t.getMessage());
-                });
-            }
-        });
-    }
-
-    // --- UI/Log Management (Без изменений) ---
-
+    // --- UI Management ---
     private void showResetConfirmationDialog() {
         new AlertDialog.Builder(this)
                 .setTitle("Clear Log?")
@@ -253,59 +200,52 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
 
         popup.setOnMenuItemClickListener(item -> {
             int selected = intervals[item.getItemId()];
-            AUTO_SCAN_INTERVAL = selected * 1000;
+            currentInterval = selected * 1000;
             updateIntervalLabel();
             Toast.makeText(this, "Interval set to " + selected + " sec", Toast.LENGTH_SHORT).show();
 
-            if (isAutoScanEnabled) {
-                startAutoScan();
+            if (isBound) {
+                scanService.setScanInterval(currentInterval);
             }
-
             return true;
         });
-
         popup.show();
     }
 
     private void updateIntervalLabel() {
-        int sec = AUTO_SCAN_INTERVAL / 1000;
+        int sec = currentInterval / 1000;
         intervalTextView.setText(sec + "s");
     }
 
-    // --- Auto Scan Control (Без изменений) ---
-
-    private void startAutoScan() {
-        stopAutoScan();
-        autoScanHandler.post(autoScanTask);
-        Log.i(TAG, "Auto scan started.");
-    }
-
-    private void stopAutoScan() {
-        autoScanHandler.removeCallbacks(autoScanTask);
-        Log.i(TAG, "Auto scan stopped.");
-    }
-
-    // --- Lifecycle (Без изменений) ---
-
+    // --- Lifecycle ---
     @Override
-    protected void onResume() {
-        super.onResume();
-        if (autoScanSwitch.isChecked()) {
-            isAutoScanEnabled = true;
-            startAutoScan();
+    protected void onStart() {
+        super.onStart();
+        if (checkPermissions()) {
+            Intent intent = new Intent(this, BackgroundScanService.class);
+            startService(intent); // Start the service to keep it alive for the preview
+            bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
+        } else {
+            requestPermissions();
         }
     }
 
     @Override
-    protected void onPause() {
-        super.onPause();
+    protected void onStop() {
+        super.onStop();
+        if (isBound) {
+            scanService.setCallback(null);
+            scanService.detachPreview();
+            unbindService(serviceConnection);
+            isBound = false;
+        }
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        cameraExecutor.shutdown();
-       // stopService(new Intent(this, BackgroundScanService.class));
-
+        if (scanService != null && !scanService.isAutoScanning()) {
+            stopService(new Intent(this, BackgroundScanService.class));
+        }
     }
 }
