@@ -56,8 +56,9 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
     private int AUTO_SCAN_INTERVAL = 3000; // Default: 3 seconds
     private boolean isAutoScanEnabled = false;
     private final int[] intervals = {2, 3, 5, 10, 15, 30, 60};
-
-    private final Runnable autoScanTask = new Runnable() {
+    private Runnable autoScanTask;
+    //private final Handler autoScanHandler = new Handler();
+   /* private final Runnable autoScanTask = new Runnable() {
         @Override
         public void run() {
             if (isAutoScanEnabled) {
@@ -70,7 +71,7 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
             }
         }
     };
-
+*/
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -94,7 +95,22 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
         }
 
         setupListeners();
-        updateRemainingScansUI(); // Первичное обновление счетчика
+        updateRemainingScansUI();
+
+        autoScanTask = new Runnable() {
+            @Override
+            public void run() {
+                if (isAutoScanEnabled) {
+                    runOnUiThread(() -> {
+                        plateLogView.setText("Auto Scanning...");
+                    });
+
+                    plateAnalyzer.requestScan();
+                    autoScanHandler.postDelayed(this, AUTO_SCAN_INTERVAL);
+                }
+            }
+        };
+
     }
 
     private void initViews() {
@@ -134,14 +150,14 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
                 startAutoScan();
                 plateLogView.setText("Auto Scan ON");
 
-                Intent serviceIntent = new Intent(this, BackgroundScanService.class);
-                ContextCompat.startForegroundService(this, serviceIntent);
+//                Intent serviceIntent = new Intent(this, BackgroundScanService.class);
+//                ContextCompat.startForegroundService(this, serviceIntent);
             } else {
                 isAutoScanEnabled = false;
                 stopAutoScan();
                 plateLogView.setText("Auto Scan OFF");
 
-                stopService(new Intent(this, BackgroundScanService.class));
+//                stopService(new Intent(this, BackgroundScanService.class));
 
             }
         });
@@ -197,6 +213,8 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
                     runOnUiThread(() -> {
                         plateLogView.setText("Found: " + plate);
                         logManager.logLicensePlate(plate);
+                        VibratorHelper.vibrate(MainActivity.this, 100); // вибрация 150мс
+
                     });
                 } else {
                     runOnUiThread(() -> plateLogView.setText("No plate found."));
@@ -287,7 +305,7 @@ public class MainActivity extends AppCompatActivity implements PlateImageAnalyze
     protected void onDestroy() {
         super.onDestroy();
         cameraExecutor.shutdown();
-        stopService(new Intent(this, BackgroundScanService.class));
+       // stopService(new Intent(this, BackgroundScanService.class));
 
     }
 }
