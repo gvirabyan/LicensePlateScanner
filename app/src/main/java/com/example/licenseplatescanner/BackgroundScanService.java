@@ -82,7 +82,7 @@ public class BackgroundScanService extends Service implements PlateImageAnalyzer
         recognizerClient = new PlateRecognizerClient();
         logManager = new LogManager(this);
         scanLimitManager = new ScanLimitManager(this);
-        cameraManager = new CameraManager(this, cameraExecutor);
+        cameraManager = new CameraManager(this, this, cameraExecutor);
         plateAnalyzer = new PlateImageAnalyzer(this);
 
         createNotificationChannel();

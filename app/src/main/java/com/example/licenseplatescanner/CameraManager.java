@@ -24,9 +24,12 @@ public class CameraManager {
     private Camera camera;
     private final Context context;
     private final ExecutorService cameraExecutor;
+    private final LifecycleOwner lifecycleOwner;
 
-    public CameraManager(Context context, ExecutorService executor) {
+
+    public CameraManager(Context context, LifecycleOwner lifecycleOwner, ExecutorService executor) {
         this.context = context;
+        this.lifecycleOwner = lifecycleOwner;
         this.cameraExecutor = executor;
     }
 
@@ -55,16 +58,18 @@ public class CameraManager {
                 .build();
         imageAnalysis.setAnalyzer(cameraExecutor, analyzer);
 
-        cameraProvider.unbindAll();
+        try {
+            cameraProvider.unbindAll();
 
-        if (previewView != null) {
-            Preview preview = new Preview.Builder().build();
-            imageAnalysis.setTargetRotation(previewView.getDisplay().getRotation());
-            camera = cameraProvider.bindToLifecycle((LifecycleOwner) context, cameraSelector, preview, imageAnalysis);
-            preview.setSurfaceProvider(previewView.getSurfaceProvider());
-        } else {
-            // If there is no preview, we are in a service, bind only image analysis
-            camera = cameraProvider.bindToLifecycle((LifecycleOwner) context, cameraSelector, imageAnalysis);
+            if (previewView != null) {
+                Preview preview = new Preview.Builder().build();
+                preview.setSurfaceProvider(previewView.getSurfaceProvider());
+                camera = cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageAnalysis);
+            } else {
+                camera = cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, imageAnalysis);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Use case binding failed", e);
         }
     }
 
